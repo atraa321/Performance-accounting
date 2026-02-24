@@ -1,0 +1,4 @@
+interface:
+  display_name: "科室绩效核算助手"
+  short_description: "Drive import, validation, calculation, and export workflows"
+  default_prompt: "Use $hospital-performance-calc to run a full performance batch workflow."
