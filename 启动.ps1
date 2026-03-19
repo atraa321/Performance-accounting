@@ -10,6 +10,16 @@ Write-Host ""
 # 设定脚本根目录，避免从其他路径执行导致找不到模块
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
+$RuntimeDir = Join-Path $Root ".runtime"
+$RuntimeLogDir = Join-Path $RuntimeDir "logs"
+$RuntimeTmpDir = Join-Path $RuntimeDir "tmp"
+$LegacyDbPath = Join-Path $Root "perf_calc.db"
+$DbPath = Join-Path $RuntimeDir "perf_calc.db"
+New-Item -ItemType Directory -Force -Path $RuntimeLogDir, $RuntimeTmpDir | Out-Null
+
+if ((Test-Path $LegacyDbPath) -and -not (Test-Path $DbPath)) {
+    Move-Item $LegacyDbPath $DbPath
+}
 
 # Python 路径（自动探测，优先项目环境）
 function Test-PythonExecutable([string]$CandidatePath) {
@@ -144,7 +154,7 @@ if ($LASTEXITCODE -eq 0) {
 # 3. 检查数据库
 Write-Host ""
 Write-Host "[3/5] 检查数据库..." -ForegroundColor Yellow
-if (-not (Test-Path "perf_calc.db")) {
+if (-not (Test-Path $DbPath)) {
     Write-Host "初始化数据库..." -ForegroundColor Yellow
     & $PYTHON -m alembic upgrade head
     if ($LASTEXITCODE -eq 0) {
@@ -198,6 +208,7 @@ Write-Host ""
 Write-Host "启动后端服务 (端口 $BACKEND_PORT)..." -ForegroundColor Yellow
 $backendJob = Start-Job -ScriptBlock {
     Set-Location $using:Root
+    $env:PERF_RUNTIME_DIR = $using:RuntimeDir
     & $using:PYTHON -m uvicorn app.main:app --host 127.0.0.1 --port $using:BACKEND_PORT 2>&1
 }
 
@@ -244,6 +255,7 @@ Write-Host ""
 Write-Host "启动前端服务 (端口 3000)..." -ForegroundColor Yellow
 $frontendJob = Start-Job -ScriptBlock {
     Set-Location $using:Root\frontend
+    $env:PERF_RUNTIME_DIR = $using:RuntimeDir
     # 让 Vite 代理指向当前脚本选定的后端端口。
     $env:VITE_BACKEND_URL = "http://localhost:$using:BACKEND_PORT"
     npm run dev 2>&1

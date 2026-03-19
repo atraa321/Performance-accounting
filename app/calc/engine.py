@@ -5,7 +5,7 @@ import hashlib
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.calc.utils import (
     allocate_by_weight,
@@ -57,7 +57,7 @@ class CalcError(Exception):
 def _clear_run(session, run_id: int) -> None:
     for model in (FactPayDetail, FactPaySummary, FactPool, FactPoolAlloc, ReconcileItem, QcIssue, DimEmployeeMonth):
         session.execute(delete(model).where(model.run_id == run_id))
-    session.commit()
+    session.flush()
 
 
 def _load_rule_params(session) -> dict[str, Decimal]:
@@ -865,7 +865,7 @@ def calculate_run(session, run_id: int) -> dict[str, list[dict[str, object]]]:
                     POOL_DOCTOR,
                 )
 
-    session.commit()
+    session.flush()
 
     # Manual raw item reconcile helpers
     manual_raw_source_amounts: dict[str, Decimal] = {}
@@ -882,6 +882,31 @@ def calculate_run(session, run_id: int) -> dict[str, list[dict[str, object]]]:
                 skip_reconcile_codes.add(mapped_code)
         else:
             unclassified_exclude_total += amount
+
+    detail_totals_by_code = {
+        code: to_decimal(amount)
+        for code, amount in session.execute(
+            select(
+                FactPayDetail.source_item_code,
+                func.sum(FactPayDetail.amount),
+            )
+            .where(FactPayDetail.run_id == run_id)
+            .group_by(FactPayDetail.source_item_code)
+        ).all()
+        if code
+    }
+    pool_totals_by_code = {
+        code: to_decimal(amount)
+        for code, amount in session.execute(
+            select(
+                FactPool.source_item_code,
+                func.sum(FactPool.amount),
+            )
+            .where(FactPool.run_id == run_id)
+            .group_by(FactPool.source_item_code)
+        ).all()
+        if code
+    }
 
     # Reconcile
     reconcile_codes = set(item_totals.keys()) | manual_item_codes | set(manual_raw_source_amounts.keys())
@@ -921,24 +946,8 @@ def calculate_run(session, run_id: int) -> dict[str, list[dict[str, object]]]:
             continue
         if code in manual_raw_source_amounts:
             source_amount = manual_raw_source_amounts.get(code, Decimal("0"))
-        direct_alloc = session.execute(
-            select(FactPayDetail).where(
-                FactPayDetail.run_id == run_id,
-                FactPayDetail.source_item_code == code,
-            )
-        ).scalars()
-        direct_total = sum([to_decimal(r.amount) for r in direct_alloc])
-        pool_total = sum(
-            [
-                to_decimal(r.amount)
-                for r in session.execute(
-                    select(FactPool).where(
-                        FactPool.run_id == run_id,
-                        FactPool.source_item_code == code,
-                    )
-                ).scalars()
-            ]
-        )
+        direct_total = detail_totals_by_code.get(code, Decimal("0"))
+        pool_total = pool_totals_by_code.get(code, Decimal("0"))
         allocated = direct_total + pool_total
         session.add(
             ReconcileItem(
@@ -950,12 +959,12 @@ def calculate_run(session, run_id: int) -> dict[str, list[dict[str, object]]]:
                 note=f"RAW_NAME:{manual_raw_name_by_code[code]}" if code in manual_raw_name_by_code else None,
             )
         )
-    session.commit()
+    session.flush()
 
     # Summary
     pay_rows = session.execute(
         select(FactPayDetail).where(FactPayDetail.run_id == run_id)
-    ).scalars()
+    ).scalars().all()
     summary = defaultdict(lambda: {
         "direct_total": Decimal("0"),
         "pool_nursing": Decimal("0"),

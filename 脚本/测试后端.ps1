@@ -6,6 +6,14 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
 $PYTHON = "D:\python38\python.exe"
+$Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$RuntimeDir = Join-Path $Root ".runtime"
+$DbPath = Join-Path $RuntimeDir "perf_calc.db"
+$LegacyDbPath = Join-Path $Root "perf_calc.db"
+New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
+if ((Test-Path $LegacyDbPath) -and -not (Test-Path $DbPath)) {
+    Move-Item $LegacyDbPath $DbPath
+}
 
 # 检查 Python
 Write-Host "[1/4] 检查 Python..." -ForegroundColor Yellow
@@ -30,7 +38,7 @@ try {
 # 检查数据库
 Write-Host ""
 Write-Host "[3/4] 检查数据库..." -ForegroundColor Yellow
-if (Test-Path "perf_calc.db") {
+if (Test-Path $DbPath) {
     Write-Host "✓ 数据库已存在" -ForegroundColor Green
 } else {
     Write-Host "初始化数据库..." -ForegroundColor Yellow
@@ -46,6 +54,7 @@ Write-Host ""
 
 $job = Start-Job -ScriptBlock {
     Set-Location $using:PWD
+    $env:PERF_RUNTIME_DIR = $using:RuntimeDir
     & $using:PYTHON -m uvicorn app.main:app --host 0.0.0.0 --port 8001
 }
 

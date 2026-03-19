@@ -19,16 +19,21 @@ from app.calc.night_schedule import parse_night_shift_counts
 from app.calc.validator import validate_run_data, save_validation_results_to_qc
 from app.calc.utils import normalize_item_name, extract_period_tag, to_decimal, round_money
 from app.core.audit import get_audit_logger
+from app.core.paths import TMP_DIR
 from app.models.models import (
     DictItemBehavior,
     DictItemMapping,
+    DimEmployeeMonth,
     FactPayDetail,
+    FactPool,
+    FactPoolAlloc,
     FactPaySummary,
     QcIssue,
     RawDoctorWorkload,
     RawHospitalPerfItem,
     RawManualDoctorWorkloadPay,
     RawManualEntry,
+    RawManualPoolAdjust,
     RawManualStudyLeavePay,
     RawNightShift,
     RawNurseWorkload,
@@ -89,6 +94,26 @@ RAW_SHEET_LABELS = {
     "nurse_workload": "护士工作量",
 }
 
+RUN_SCOPED_MODELS = (
+    RawHospitalPerfItem,
+    RawRoster,
+    RawNightShift,
+    RawReadingFee,
+    RawDoctorWorkload,
+    RawNurseWorkload,
+    RawManualDoctorWorkloadPay,
+    RawManualPoolAdjust,
+    RawManualStudyLeavePay,
+    RawManualEntry,
+    DimEmployeeMonth,
+    FactPool,
+    FactPoolAlloc,
+    FactPayDetail,
+    FactPaySummary,
+    ReconcileItem,
+    QcIssue,
+)
+
 
 def _replace_manual_rows(db, run_id: int, model, rows):
     db.execute(delete(model).where(model.run_id == run_id))
@@ -102,6 +127,11 @@ def _replace_manual_rows(db, run_id: int, model, rows):
 def _ensure_table(db, model):
     bind = db.get_bind()
     model.__table__.create(bind=bind, checkfirst=True)
+
+
+def _delete_run_rows(db, run_id: int, models) -> None:
+    for model in models:
+        db.execute(delete(model).where(model.run_id == run_id))
 
 
 @router.get("/runs/{run_id}/manual/workload")
@@ -313,21 +343,10 @@ def import_excel_api(run_id: int, clear_existing: bool = True, file: UploadFile 
         raise HTTPException(status_code=404, detail="Run not found")
     audit_logger = get_audit_logger(db)
     if clear_existing:
-        for model in (
-            RawHospitalPerfItem,
-            RawRoster,
-            RawNightShift,
-            RawReadingFee,
-            RawDoctorWorkload,
-            RawNurseWorkload,
-            RawManualDoctorWorkloadPay,
-            RawManualEntry,
-        ):
-            db.execute(delete(model).where(model.run_id == run_id))
-        for model in (FactPayDetail, FactPaySummary, ReconcileItem, QcIssue):
-            db.execute(delete(model).where(model.run_id == run_id))
+        _delete_run_rows(db, run_id, RUN_SCOPED_MODELS)
         db.commit()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+    tmp_path = None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx", dir=TMP_DIR) as tmp:
         content = file.file.read()
         tmp.write(content)
         tmp_path = tmp.name
@@ -336,6 +355,12 @@ def import_excel_api(run_id: int, clear_existing: bool = True, file: UploadFile 
     except Exception as exc:
         audit_logger.log_error("DATA_IMPORT", "导入Excel数据", str(exc), run_id=run_id)
         raise
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     result["cleared_existing"] = clear_existing
     audit_logger.log_excel_imported(run_id, result.get("stats", {}))
     if result.get("qc_issue_count"):
@@ -369,7 +394,8 @@ def import_excel_sheet_api(
     audit_logger = get_audit_logger(db)
     db.execute(delete(model).where(model.run_id == run_id))
     db.commit()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
+    tmp_path = None
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx", dir=TMP_DIR) as tmp:
         content = file.file.read()
         tmp.write(content)
         tmp_path = tmp.name
@@ -378,6 +404,12 @@ def import_excel_sheet_api(
     except Exception as exc:
         audit_logger.log_error("DATA_IMPORT", "导入单表数据", str(exc), run_id=run_id)
         raise
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
     result["cleared_existing"] = True
     result["sheet"] = sheet
     audit_logger.log(
@@ -1022,39 +1054,8 @@ def delete_run(run_id: int, db=Depends(get_db)):
         raise HTTPException(status_code=400, detail="Cannot delete locked run")
     
     # 删除所有相关数据
-    # 原始数据
-    db.execute(select(RawHospitalPerfItem).where(RawHospitalPerfItem.run_id == run_id)).scalars().all()
-    for item in db.execute(select(RawHospitalPerfItem).where(RawHospitalPerfItem.run_id == run_id)).scalars():
-        db.delete(item)
-    for item in db.execute(select(RawRoster).where(RawRoster.run_id == run_id)).scalars():
-        db.delete(item)
-    for item in db.execute(select(RawNightShift).where(RawNightShift.run_id == run_id)).scalars():
-        db.delete(item)
-    for item in db.execute(select(RawReadingFee).where(RawReadingFee.run_id == run_id)).scalars():
-        db.delete(item)
-    for item in db.execute(select(RawDoctorWorkload).where(RawDoctorWorkload.run_id == run_id)).scalars():
-        db.delete(item)
-    for item in db.execute(select(RawNurseWorkload).where(RawNurseWorkload.run_id == run_id)).scalars():
-        db.delete(item)
-    for item in db.execute(select(RawManualDoctorWorkloadPay).where(RawManualDoctorWorkloadPay.run_id == run_id)).scalars():
-        db.delete(item)
-    for item in db.execute(select(RawManualEntry).where(RawManualEntry.run_id == run_id)).scalars():
-        db.delete(item)
-    
-    # 计算结果
-    for item in db.execute(select(FactPaySummary).where(FactPaySummary.run_id == run_id)).scalars():
-        db.delete(item)
-    for item in db.execute(select(FactPayDetail).where(FactPayDetail.run_id == run_id)).scalars():
-        db.delete(item)
-    
-    # 对账数据
-    for item in db.execute(select(ReconcileItem).where(ReconcileItem.run_id == run_id)).scalars():
-        db.delete(item)
-    
-    # 质量检查
-    for item in db.execute(select(QcIssue).where(QcIssue.run_id == run_id)).scalars():
-        db.delete(item)
-    
+    _delete_run_rows(db, run_id, RUN_SCOPED_MODELS)
+
     # 删除批次本身
     db.delete(run)
     db.commit()
